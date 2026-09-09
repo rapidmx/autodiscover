@@ -3,20 +3,22 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 // Lightweight, deterministic test-double implementations of this library's pluggable interfaces
-// (`BlobStore`, `SearchProvider`, `SpamScanProvider`, `AvScanProvider`, `MailTransport`), registered with an
-// `ObjectFactory` under the same string names the library's `@Inject("...")` decorators resolve against. Every
-// integration test that boots the shared `test/server-mongo`/`test/server-sql` fixture app needs these
-// registered *before* `server.start()`, because `Server` eagerly instantiates every route it discovers -
-// including routes (Attachment/Message/MailIngest/Search) that inject these interfaces - regardless of which
-// specific route a given test file is exercising. This is a deliberate departure from `@rapidrest/auth`'s "no
-// shared test utility" convention: this library has pluggable interfaces auth does not, and duplicating this
-// registration across ~24 integration test files would be unreasonable.
+// (`BlobStore`, `SearchProvider`, `SpamScanProvider`, `AvScanProvider`, `MailTransport`, `DnsResolver`),
+// registered with an `ObjectFactory` under the same string names the library's `@Inject("...")` decorators
+// resolve against. Every integration test that boots the shared `test/server-mongo`/`test/server-sql` fixture
+// app needs these registered *before* `server.start()`, because `Server` eagerly instantiates every route/
+// background service it discovers - including `DomainVerificationJob`, which injects `DnsResolver` - regardless
+// of which specific route a given test file is exercising. This is a deliberate departure from
+// `@rapidrest/auth`'s "no shared test utility" convention: this library has pluggable interfaces auth does not,
+// and duplicating this registration across every integration test file would be unreasonable.
 import {
     AvVerdict,
     SpamVerdict,
     type BlobPutOptions,
     type BlobRange,
     type BlobStore,
+    type DnsMxRecord,
+    type DnsResolver,
     type MailTransport,
     type OutboundMessage,
     type TransportResult,
@@ -161,6 +163,34 @@ export class RecordingMailTransport implements MailTransport {
 }
 
 /**
+ * A `DnsResolver` backed by an in-memory `Map` a test populates directly (`resolver.records.set("example.com",
+ * [["rapidmx-domain-verification=abc123"]])`) rather than ever touching real DNS. Throws (matching a real
+ * resolver's NXDOMAIN/no-records behavior) for any hostname with no entry. Autodiscover itself never calls
+ * this - it exists only so `DomainVerificationJob`, which `Server` starts unconditionally as a background
+ * service, has something to inject.
+ */
+export class StaticDnsResolver implements DnsResolver {
+    public records: Map<string, string[][]> = new Map();
+    public mxRecords: Map<string, DnsMxRecord[]> = new Map();
+
+    public async resolveTxt(hostname: string): Promise<string[][]> {
+        const records: string[][] | undefined = this.records.get(hostname);
+        if (!records) {
+            throw new Error(`StaticDnsResolver: no TXT records for '${hostname}'`);
+        }
+        return records;
+    }
+
+    public async resolveMx(hostname: string): Promise<DnsMxRecord[]> {
+        const records: DnsMxRecord[] | undefined = this.mxRecords.get(hostname);
+        if (!records) {
+            throw new Error(`StaticDnsResolver: no MX records for '${hostname}'`);
+        }
+        return records;
+    }
+}
+
+/**
  * Registers a full set of test-double implementations for this library's pluggable interfaces against
  * `objectFactory`. Call this before `server.start()` in any integration test that boots the shared server
  * fixture apps.
@@ -171,4 +201,5 @@ export function registerTestDoubles(objectFactory: ObjectFactory): void {
     objectFactory.register(AlwaysCleanSpamScanProvider, "SpamScanProvider");
     objectFactory.register(AlwaysCleanAvScanProvider, "AvScanProvider");
     objectFactory.register(RecordingMailTransport, "MailTransport");
+    objectFactory.register(StaticDnsResolver, "DnsResolver");
 }
